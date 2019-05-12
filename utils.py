@@ -2,23 +2,18 @@
 # -*- coding:utf-8 -*-
 # Author: kerlomz <kerlomz@gmail.com>
 import io
-
 import PIL.Image
 import cv2
 import numpy as np
 import tensorflow as tf
 
 from config import *
+from constants import RunMode
 from pretreatment import preprocessing
 
 PATH_MAP = {
     RunMode.Trains: TRAINS_PATH,
     RunMode.Test: TEST_PATH
-}
-
-REGEX_MAP = {
-    RunMode.Trains: TRAINS_REGEX,
-    RunMode.Test: TEST_REGEX
 }
 
 
@@ -36,16 +31,20 @@ class DataIterator:
     def __init__(self, mode: RunMode):
         self.mode = mode
         self.data_dir = PATH_MAP[mode]
-        self.image = []
+        self.next_element = None
         self.image_path = []
         self.label_list = []
-        self.image_batch = []
-        self.label_batch = []
-        self._label_batch = []
         self._size = 0
+        self.max_length = 0
+        self.is_first = True
 
-    @staticmethod
-    def _encoder(code):
+    # def padding(self, label):
+    #     label_len = len(label)
+    #     if label_len < self.max_length:
+    #         return label + (self.max_length - label_len) * [0]
+    #     return label
+
+    def _encoder(self, code):
         if isinstance(code, bytes):
             code = code.decode('utf8')
 
@@ -56,7 +55,8 @@ class DataIterator:
         code = code.lower() if 'LOWER' in CHAR_SET or not CASE_SENSITIVE else code
         code = code.upper() if 'UPPER' in CHAR_SET else code
         try:
-            return [SPACE_INDEX if code == SPACE_TOKEN else encode_maps()[c] for c in list(code)]
+            return [encode_maps()[c] for c in list(code)]
+            # return self.padding([encode_maps()[c] for c in list(code)])
         except KeyError as e:
             exception(
                 'The sample label {} contains invalid charset: {}.'.format(
@@ -69,15 +69,15 @@ class DataIterator:
             self.image_path = data_set
             try:
                 self.label_list = [
-                    self._encoder(re.search(REGEX_MAP[self.mode], i.split(PATH_SPLIT)[-1]).group()) for i in data_set
+                    self._encoder(re.search(TRAINS_REGEX, i.split(PATH_SPLIT)[-1]).group()) for i in data_set
                 ]
             except AttributeError as e:
                 regex_not_found = "group" in e.args[0]
                 if regex_not_found:
                     exception(
                         "Configured {} is '{}', it may be wrong and unable to get label properly.".format(
-                            "TrainRegex" if self.mode == RunMode.Trains else "TestRegex",
-                            TRAINS_REGEX if self.mode == RunMode.Trains else TEST_REGEX
+                            "TrainRegex",
+                            TRAINS_REGEX
                         ),
                         ConfigException.GET_LABEL_REGEX_ERROR
                     )
@@ -85,16 +85,18 @@ class DataIterator:
             for root, sub_folder, file_list in os.walk(self.data_dir):
                 for file_path in file_list:
                     image_name = os.path.join(root, file_path)
+                    if file_path in IGNORE_FILES:
+                        continue
                     self.image_path.append(image_name)
                     # Get the label from the file name based on the regular expression.
                     code = re.search(
-                        REGEX_MAP[self.mode], image_name.split(PATH_SPLIT)[-1]
+                        TRAINS_REGEX, image_name.split(PATH_SPLIT)[-1]
                     )
                     if not code:
                         exception(
                             "Configured {} is '{}', it may be wrong and unable to get label properly.".format(
-                                "TrainRegex" if self.mode == RunMode.Trains else "TestRegex",
-                                TRAINS_REGEX if self.mode == RunMode.Trains else TEST_REGEX
+                                "TrainRegex",
+                                TRAINS_REGEX
                             ),
                             ConfigException.GET_LABEL_REGEX_ERROR
                         )
@@ -105,15 +107,11 @@ class DataIterator:
                     self.label_list.append(self._encoder(code))
         self._size = len(self.label_list)
 
-    def read_sample_from_tfrecords(self, path):
-        filename_queue = tf.train.string_input_producer([path])
-        reader = tf.TFRecordReader()
+    @staticmethod
+    def parse_example(serial_example):
 
-        self._size = len([_ for _ in tf.python_io.tf_record_iterator(path)])
-
-        _, serialized_example = reader.read(filename_queue)
         features = tf.parse_single_example(
-            serialized_example,
+            serial_example,
             features={
                 'label': tf.FixedLenFeature([], tf.string),
                 'image': tf.FixedLenFeature([], tf.string),
@@ -122,16 +120,18 @@ class DataIterator:
         image = tf.cast(features['image'], tf.string)
         label = tf.cast(features['label'], tf.string)
 
+        return image, label
+
+    def read_sample_from_tfrecords(self, path):
+        self._size = len([_ for _ in tf.python_io.tf_record_iterator(path)])
+
         min_after_dequeue = 1000
         batch = BATCH_SIZE if self.mode == RunMode.Trains else TEST_BATCH_SIZE
-        capacity = min_after_dequeue + 3 * batch
-        self.image_batch, self.label_batch = tf.train.shuffle_batch(
-            [image, label],
-            batch_size=batch,
-            capacity=capacity,
-            num_threads=64,
-            min_after_dequeue=min_after_dequeue
-        )
+
+        dataset_train = tf.data.TFRecordDataset(path).map(self.parse_example)
+        dataset_train = dataset_train.shuffle(min_after_dequeue).batch(batch).repeat()
+        iterator = dataset_train.make_one_shot_iterator()
+        self.next_element = iterator.get_next()
 
     @property
     def size(self):
@@ -159,12 +159,14 @@ class DataIterator:
             background.paste(pil_image, (0, 0, size[0], size[1]), pil_image)
             pil_image = background
 
-        pil_image = pil_image.convert('L')
+        if IMAGE_CHANNEL == 1:
+            pil_image = pil_image.convert('L')
+
         im = np.array(pil_image)
         im = preprocessing(im, BINARYZATION, SMOOTH, BLUR).astype(np.float32)
         im = cv2.resize(im, (RESIZE[0], RESIZE[1]))
         im = im.swapaxes(0, 1)
-        return np.array(im[:, :, np.newaxis] / 255.)
+        return np.array((im[:, :, np.newaxis] if IMAGE_CHANNEL == 1 else im[:, :]) / 255.)
 
     @staticmethod
     def _get_input_lens(sequences):
@@ -178,6 +180,11 @@ class DataIterator:
         else:
             image_batch = [self._image(i) for i in self.image_path]
             label_batch = self.label_list
+
+        if self.is_first:
+            self.max_length = self._max_length(label_batch)
+            self.is_first = False
+
         return self._generate_batch(image_batch, label_batch)
 
     def _generate_batch(self, image_batch, label_batch):
@@ -186,16 +193,36 @@ class DataIterator:
         self._label_batch = batch_labels
         return batch_inputs, batch_seq_len, batch_labels
 
+    @staticmethod
+    def _max_length(dataset_list):
+        dataset_list = list(dataset_list)
+        if not dataset_list:
+            raise ValueError("Unable to find maximum character length, the dataset is empty!")
+        if isinstance(dataset_list[0], bytes):
+            dataset_list = [_.decode() for _ in dataset_list]
+        return max([len(_) for _ in dataset_list])
+
     def generate_batch_by_tfrecords(self, sess):
-        _image, _label = sess.run([self.image_batch, self.label_batch])
-        image_batch = [self._image(i) for i in _image]
-        label_batch = [self._encoder(i) for i in _label]
-        self._label_batch = label_batch
+        _image, _label = sess.run(self.next_element)
+
+        if self.is_first:
+            self.max_length = self._max_length(_label)
+            self.is_first = False
+
+        image_batch, label_batch = [], []
+        for (i1, i2) in zip(_image, _label):
+            try:
+                image_batch.append(self._image(i1))
+                label_batch.append(self._encoder(i2))
+            except OSError:
+                continue
         self.label_list = label_batch
         return self._generate_batch(image_batch, label_batch)
 
 
-def accuracy_calculation(original_seq, decoded_seq, ignore_value=-1):
+def accuracy_calculation(original_seq, decoded_seq, ignore_value=None):
+    if ignore_value is None:
+        ignore_value = [-1]
     original_seq_len = len(original_seq)
     decoded_seq_len = len(decoded_seq)
     if original_seq_len != decoded_seq_len:
@@ -209,7 +236,7 @@ def accuracy_calculation(original_seq, decoded_seq, ignore_value=-1):
     # Here is for debugging, positioning error source use
     # error_sample = []
     for i, origin_label in enumerate(original_seq):
-        decoded_label = [j for j in decoded_seq[i] if j != ignore_value]
+        decoded_label = [j for j in decoded_seq[i] if j not in ignore_value]
         if i < 5:
             print(i, len(origin_label), len(decoded_label), origin_label, decoded_label)
         if origin_label == decoded_label:
@@ -225,7 +252,6 @@ def accuracy_calculation(original_seq, decoded_seq, ignore_value=-1):
     return count * 1.0 / len(original_seq)
 
 
-# Convert a sequence list to a sparse matrix
 def sparse_tuple_from_label(sequences, dtype=np.int32):
     indices = []
     values = []
@@ -237,3 +263,4 @@ def sparse_tuple_from_label(sequences, dtype=np.int32):
     values = np.asarray(values, dtype=dtype)
     shape = np.asarray([len(sequences), np.asarray(indices).max(0)[1] + 1], dtype=np.int64)
     return indices, values, shape
+

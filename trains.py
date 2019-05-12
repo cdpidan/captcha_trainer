@@ -30,7 +30,8 @@ def compile_graph(acc):
         )
         model.build_graph()
         input_graph_def = sess.graph.as_graph_def()
-        saver = tf.train.Saver()
+        saver = tf.train.Saver(var_list=tf.global_variables())
+        logger.info(tf.train.latest_checkpoint(MODEL_PATH))
         saver.restore(sess, tf.train.latest_checkpoint(MODEL_PATH))
 
     output_graph_def = convert_variables_to_constants(
@@ -40,7 +41,7 @@ def compile_graph(acc):
     )
 
     last_compile_model_path = COMPILE_MODEL_PATH.replace('.pb', '_{}.pb'.format(int(acc * 10000)))
-    with tf.gfile.FastGFile(last_compile_model_path, mode='wb') as gf:
+    with tf.gfile.GFile(last_compile_model_path, mode='wb') as gf:
         gf.write(output_graph_def.SerializeToString())
 
     generate_config(acc)
@@ -84,6 +85,8 @@ def train_process(mode=RunMode.Trains):
 
     print('Total {} Trains DataSets'.format(train_feeder.size))
     print('Total {} Test DataSets'.format(test_feeder.size))
+    if test_feeder.size >= train_feeder.size:
+        exception("The number of training sets cannot be less than the test set.", )
 
     num_train_samples = train_feeder.size
     num_test_samples = test_feeder.size
@@ -95,10 +98,11 @@ def train_process(mode=RunMode.Trains):
     num_batches_per_epoch = int(num_train_samples / BATCH_SIZE)
 
     config = tf.ConfigProto(
-        allow_soft_placement=True,
+        # allow_soft_placement=True,
         log_device_placement=False,
         gpu_options=tf.GPUOptions(
-            # allow_growth=True,  # it will cause fragmentation.
+            allocator_type='BFC',
+            allow_growth=True,  # it will cause fragmentation.
             per_process_gpu_memory_fraction=GPU_USAGE)
     )
     accuracy = 0
@@ -107,8 +111,6 @@ def train_process(mode=RunMode.Trains):
     with tf.Session(config=config) as sess:
         init_op = tf.global_variables_initializer()
         sess.run(init_op)
-        coord = tf.train.Coordinator()
-        threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
         saver = tf.train.Saver(tf.global_variables(), max_to_keep=2)
         train_writer = tf.summary.FileWriter('logs', sess.graph)
@@ -116,14 +118,13 @@ def train_process(mode=RunMode.Trains):
             saver.restore(sess, tf.train.latest_checkpoint(MODEL_PATH))
         except ValueError:
             pass
-
         print('Start training...')
 
         while 1:
             shuffle_trains_idx = np.random.permutation(num_train_samples)
             train_cost = 0
             start_time = time.time()
-
+            _avg_train_cost = 0
             for cur_batch in range(num_batches_per_epoch):
                 batch_time = time.time()
                 index_list = [
@@ -146,11 +147,11 @@ def train_process(mode=RunMode.Trains):
                 )
                 train_cost += batch_cost * BATCH_SIZE
                 avg_train_cost = train_cost / ((cur_batch + 1) * BATCH_SIZE)
-
+                _avg_train_cost = avg_train_cost
                 train_writer.add_summary(summary_str, step)
 
-                if step % 100 == 0:
-                    print('Step: {} Time: {:.3f}, Cost = {:.3f}'.format(step, time.time() - batch_time, avg_train_cost))
+                if step % 100 == 0 and step != 0:
+                    print('Step: {} Time: {:.3f} sec/batch, Cost = {:.5f}'.format(step, time.time() - batch_time, avg_train_cost))
 
                 if step % TRAINS_SAVE_STEPS == 0 and step != 0:
                     saver.save(sess, SAVE_MODEL, global_step=step)
@@ -172,31 +173,28 @@ def train_process(mode=RunMode.Trains):
                         model.inputs: test_inputs,
                         model.labels: test_labels
                     }
-                    dense_decoded, last_batch_err, lr = sess.run(
-                        [model.dense_decoded, model.last_batch_error, model.lrn_rate],
+                    dense_decoded, lr = sess.run(
+                        [model.dense_decoded, model.lrn_rate],
                         feed_dict=val_feed
                     )
                     accuracy = utils.accuracy_calculation(
                         test_feeder.labels(None if TRAINS_USE_TFRECORDS else index_test),
                         dense_decoded,
-                        ignore_value=-1,
+                        ignore_value=[0, -1],
                     )
-                    log = "Epoch: {}, Step: {}, Accuracy = {:.3f}, Cost = {:.3f}, " \
-                          "Time = {:.3f}, LearningRate: {}, LastBatchError: {}"
+                    log = "Epoch: {}, Step: {}, Accuracy = {:.4f}, Cost = {:.5f}, " \
+                          "Time = {:.3f} sec/batch, LearningRate: {}"
                     print(log.format(
-                        epoch_count, step, accuracy, avg_train_cost, time.time() - batch_time, lr, last_batch_err
+                        epoch_count, step, accuracy, avg_train_cost, time.time() - batch_time, lr
                     ))
 
-                    if accuracy >= TRAINS_END_ACC and epoch_count >= TRAINS_END_EPOCHS:
+                    if accuracy >= TRAINS_END_ACC and epoch_count >= TRAINS_END_EPOCHS and avg_train_cost <= TRAINS_END_COST:
                         break
-            if accuracy >= TRAINS_END_ACC and epoch_count >= TRAINS_END_EPOCHS:
+            if accuracy >= TRAINS_END_ACC and epoch_count >= TRAINS_END_EPOCHS and _avg_train_cost <= TRAINS_END_COST:
                 compile_graph(accuracy)
-                print('Total Time: {}'.format(time.time() - start_time))
+                print('Total Time: {} sec.'.format(time.time() - start_time))
                 break
             epoch_count += 1
-
-        coord.request_stop()
-        coord.join(threads)
 
 
 def generate_config(acc):
