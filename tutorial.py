@@ -18,11 +18,12 @@ trains_path = [
     r"D:\TrainSet\***",
 ]
 
-test_num = 3000
+test_num = 500
 hidden_num = 64
 beam_width = 1
+learning_rate = None
 
-name_prefix = "tax"
+name_prefix = None
 name_suffix = None
 name_prefix = name_prefix if name_prefix else "tutorial"
 name_suffix = '-' + str(name_suffix) if name_suffix else ''
@@ -88,6 +89,7 @@ NeuralNet:
   CTCMergeRepeated: True
   CTCBeamWidth: @beam_width
   CTCTopPaths: 1
+  WarpCTC: False
   
 # TrainsPath and TestPath: The local absolute path of your training and testing set.
 # DatasetPath: Package a sample of the TFRecords format from this path.
@@ -136,7 +138,6 @@ if width > 160 or width < 120:
 else:
     r_height = height
 resize = "[{}, {}]".format(width if r_height == height else 150, r_height)
-# resize = "[{}, {}]".format(width, height)
 
 
 model_name = '{}-mix-{}{}-{}-H{}{}'.format(
@@ -152,10 +153,13 @@ trains_path = json.dumps(trains_path, ensure_ascii=False, indent=2).replace('\n'
 BEST_LEARNING_RATE = {
     Optimizer.AdaBound: 0.001,
     Optimizer.Momentum: 0.01,
-    Optimizer.Adam: 0.01
+    Optimizer.Adam: 0.01,
+    Optimizer.SGD: 0.01,
+    Optimizer.RMSProp: 0.01,
+    Optimizer.AdaGrad: 0.01,
 }
 
-learning_rate = BEST_LEARNING_RATE[optimizer]
+learning_rate = BEST_LEARNING_RATE[optimizer] if not learning_rate else learning_rate
 
 
 result = model.replace(
@@ -193,7 +197,7 @@ print(result)
 with open("model.yaml".format(size_str), "w", encoding="utf8") as f:
     f.write(result)
 
-from make_dataset import run
+from make_dataset import make_dataset
 from trains import main
-run()
+make_dataset()
 main(None)

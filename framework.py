@@ -2,8 +2,8 @@
 # -*- coding:utf-8 -*-
 # Author: kerlomz <kerlomz@gmail.com>
 import sys
-
 import tensorflow as tf
+from importlib import import_module
 from distutils.version import StrictVersion
 from config import *
 from network.CNN import CNN5
@@ -23,7 +23,7 @@ class GraphOCR(object):
         self.utils = NetworkUtils(mode)
         self.network = cnn
         self.recurrent = recurrent
-        self.inputs = tf.placeholder(tf.float32, [None, RESIZE[0], RESIZE[1], IMAGE_CHANNEL], name='input')
+        self.inputs = tf.placeholder(tf.float32, [None, None, RESIZE[1], IMAGE_CHANNEL], name='input')
         self.labels = tf.sparse_placeholder(tf.int32, name='labels')
         self.seq_len = None
         self.merged_summary = None
@@ -45,15 +45,14 @@ class GraphOCR(object):
             x = DenseNet(inputs=self.inputs, utils=self.utils).build()
 
         else:
-            print('This cnn neural network is not supported at this time.')
+            tf.logging.error('This cnn neural network is not supported at this time.')
             sys.exit(-1)
 
-        shape_list = x.get_shape().as_list()
         # time_major = True: [max_time_step, batch_size, num_classes]
         # time_major = False: [batch_size, max_time_step, num_classes]
-        print("CNN Output: {}".format(x.get_shape()))
+        tf.logging.info("CNN Output: {}".format(x.get_shape()))
 
-        self.seq_len = tf.fill([tf.shape(x)[0]], shape_list[1], name="seq_len")
+        self.seq_len = tf.fill([tf.shape(x)[0]], tf.shape(x)[1], name="seq_len")
 
         if self.recurrent == RecurrentNetwork.LSTM:
             recurrent_network_builder = LSTM(self.utils, x, self.seq_len)
@@ -66,7 +65,7 @@ class GraphOCR(object):
         elif self.recurrent == RecurrentNetwork.BSRU:
             recurrent_network_builder = BSRU(self.utils, x, self.seq_len)
         else:
-            print('This recurrent neural network is not supported at this time.')
+            tf.logging.error('This recurrent neural network is not supported at this time.')
             sys.exit(-1)
 
         outputs = recurrent_network_builder.build()
@@ -101,16 +100,24 @@ class GraphOCR(object):
     def _build_train_op(self):
         self.global_step = tf.train.get_or_create_global_step()
         # ctc loss function, using forward and backward algorithms and maximum likelihood.
-
-        self.loss = tf.nn.ctc_loss(
-            labels=self.labels,
-            inputs=self.predict,
-            sequence_length=self.seq_len,
-            ctc_merge_repeated=CTC_MERGE_REPEATED,
-            preprocess_collapse_repeated=PREPROCESS_COLLAPSE_REPEATED,
-            ignore_longer_outputs_than_inputs=False,
-            time_major=CTC_LOSS_TIME_MAJOR
-        )
+        if WARP_CTC:
+            import_module('warpctc_tensorflow')
+            with tf.get_default_graph()._kernel_label_map({"CTCLoss": "WarpCTC"}):
+                self.loss = tf.nn.ctc_loss(
+                    inputs=self.predict,
+                    labels=self.labels,
+                    sequence_length=self.seq_len
+                )
+        else:
+            self.loss = tf.nn.ctc_loss(
+                labels=self.labels,
+                inputs=self.predict,
+                sequence_length=self.seq_len,
+                ctc_merge_repeated=CTC_MERGE_REPEATED,
+                preprocess_collapse_repeated=PREPROCESS_COLLAPSE_REPEATED,
+                ignore_longer_outputs_than_inputs=False,
+                time_major=CTC_LOSS_TIME_MAJOR
+            )
 
         self.cost = tf.reduce_mean(self.loss)
         tf.summary.scalar('cost', self.cost)
@@ -187,8 +194,8 @@ class GraphOCR(object):
 
         # Find the optimal path
         self.decoded, self.log_prob = tf.nn.ctc_beam_search_decoder(
-            self.predict,
-            self.seq_len,
+            inputs=self.predict,
+            sequence_length=self.seq_len,
             merge_repeated=False,
             beam_width=CTC_BEAM_WIDTH,
             top_paths=CTC_TOP_PATHS,

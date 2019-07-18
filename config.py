@@ -99,6 +99,8 @@ IMAGE_HEIGHT = cf_model['Model'].get('ImageHeight')
 IMAGE_WIDTH = cf_model['Model'].get('ImageWidth')
 IMAGE_CHANNEL = cf_model['Model'].get('ImageChannel')
 IMAGE_CHANNEL = IMAGE_CHANNEL if IMAGE_CHANNEL else 1
+MULTI_SHAPE = False
+
 
 """NEURAL NETWORK"""
 NEU_CNN = cf_model['NeuralNet'].get('CNNNetwork')
@@ -119,6 +121,8 @@ CTC_BEAM_WIDTH = CTC_BEAM_WIDTH if CTC_BEAM_WIDTH is not None else 1
 CTC_TOP_PATHS = cf_model['NeuralNet'].get('CTCTopPaths')
 CTC_TOP_PATHS = CTC_TOP_PATHS if CTC_TOP_PATHS is not None else 1
 CTC_LOSS_TIME_MAJOR = True
+WARP_CTC = cf_model['NeuralNet'].get('WarpCTC')
+WARP_CTC = WARP_CTC if WARP_CTC is not None else False
 
 
 LEAKINESS = 0.01

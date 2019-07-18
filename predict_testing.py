@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import PIL.Image as PIL_Image
 import tensorflow as tf
+from importlib import import_module
 from config import *
 from constants import RunMode
 from pretreatment import preprocessing
@@ -30,7 +31,12 @@ def get_image_batch(img_bytes):
 
         im = np.array(pil_image)
         im = preprocessing(im, BINARYZATION, SMOOTH, BLUR).astype(np.float32)
-        im = cv2.resize(im, (RESIZE[0], RESIZE[1]))
+        if RESIZE[0] == -1:
+            ratio = RESIZE[1] / size[1]
+            resize_width = int(ratio * size[0])
+            im = cv2.resize(im, (resize_width, RESIZE[1]))
+        else:
+            im = cv2.resize(im, (RESIZE[0], RESIZE[1]))
         im = im.swapaxes(0, 1)
         return (im[:, :, np.newaxis] if IMAGE_CHANNEL == 1 else im[:, :]) / 255.
 
@@ -60,6 +66,8 @@ def predict_func(image_batch, _sess, dense_decoded, op_input):
 
 if __name__ == '__main__':
 
+    if WARP_CTC:
+        import_module('warpctc_tensorflow')
     graph = tf.Graph()
     tf_checkpoint = tf.train.latest_checkpoint(MODEL_PATH)
     sess = tf.Session(
@@ -70,7 +78,7 @@ if __name__ == '__main__':
             gpu_options=tf.GPUOptions(
                 allocator_type='BFC',
                 # allow_growth=True,  # it will cause fragmentation.
-                per_process_gpu_memory_fraction=0.1
+                per_process_gpu_memory_fraction=0.01
             ))
     )
     graph_def = graph.as_graph_def()
